@@ -1,8 +1,9 @@
 #! /usr/bin/env python
 #
 # util_NRExtrudeOverlapGrid.py
+# added options --remove-duplicate-res and --optimal-res to remove simulations with duplicate resolutions for simulations of identical parameters
 #
-#   This takes the whole NR catalog (aligned spin only!) and extrudes it in mtot (only)
+#   This takes the whole NR catalog and extrudes it in mtot (only)
 #   Comparisons for cutoff are done ONLY using the 'approx' in LAL, for convenience
 #
 # EXAMPLES
@@ -25,6 +26,8 @@ import lalsimulation as lalsim
 import lalframe
 import lal
 import functools
+import re
+import json
 
 import RIFT.physics.effectiveFisher  as eff   # for the mesh grid generation
 import RIFT.physics.PrecessingFisherMatrix   as pcf   # Superior tools to perform overlaps. Will need to standardize with Evans' approach in effectiveFisher.py
@@ -72,6 +75,9 @@ parser.add_argument("--mass-eta-factor",default=0,type=float, help="The mass ran
 # Cutoff options
 parser.add_argument("--skip-overlap",action='store_true', help="If true, the grid is generated without actually performing overlaps. Very helpful if the grid is just in mtot, for the purposes of reproducing a specific NR simulation")
 parser.add_argument("--match-value", type=float, default=0.01, help="Use this as the minimum match value. Default is 0.01 (i.e., keep almost everything)")
+parser.add_argument("--remove-duplicate-res", action="store_true",default=False, help="pick only one resolution for each simulation (removes duplicate resolutions of simulations with identical parameters)")
+parser.add_argument("--optimal-res",default=120, type=int, help='ideal resolution to pick for simulations with duplicates, if optimal not available code picks highest available')
+
 # Overlap options
 parser.add_argument("--fisher-psd",type=str,default="SimNoisePSDaLIGOZeroDetHighPower",help="psd name ('eval'). lalsim., lalsim.SimNoisePSDaLIGOZeroDetHighPower, lalsimutils.Wrapper_AdvLIGOPsd, .SimNoisePSDiLIGOSRD... ")
 parser.add_argument("--psd-file",  help="File name for PSD (assumed hanford). Overrides --fisher-psd if provided")
@@ -99,6 +105,8 @@ parser.add_argument("--approx",type=str,default="SEOBNRv2")
 # Output options
 parser.add_argument("--fname", default="overlap-grid", help="Base output file for ascii text (.dat) and xml (.xml.gz)")
 parser.add_argument("--verbose", action="store_true",default=False, help="Required to build post-frame-generating sanity-test plots")
+parser.add_argument("--debug-PM", action="store_true",default=False, help="code editing debug")
+
 parser.add_argument("--save-plots",default=False,action='store_true', help="Write plots to file (only useful for OSX, where interactive is default")
 opts=  parser.parse_args()
 
@@ -306,6 +314,11 @@ if opts.inj and opts.insert_missing_spokes:
 P_list_NR = []
 omega_list_NR=[]
 
+Sim_list_sorted = []
+res_sorted_sim_list = []
+grouped = {}
+
+
 glist = []
 if opts.group:
     glist = [opts.group]
@@ -315,9 +328,89 @@ else:
 eta_range = eval(opts.eta_range)
 
 print(opts.group, opts.param)
+if opts.verbose:
+    print('optimal resolution is: ', opts.optimal_res)
 for group in glist:
+    
   if not opts.param:
-    for param in nrwf.internal_ParametersAvailable[group]:
+    if opts.remove_duplicate_res:
+        for param in nrwf.internal_ParametersAvailable[group]:
+            Sim_list_sorted = Sim_list_sorted + [param]
+        print('" ---- LENGTH CHECK --- "')
+        print('length before removing duplicate resolutions',len(Sim_list_sorted))  
+        Sim_list_sorted.sort()
+        for param in Sim_list_sorted:
+            if opts.group == 'Sequence-RIT-All' or opts.group == 'RIT-Four' or opts.group == 'RIT-Five':
+                #files named as ExtrapStrain_RIT-eBBH-1913-n100.h5 or ExtrapStrain_RIT-BBH-1914-n100.h5
+                pattern = re.compile(r'^(?P<base>.+?)-n(?P<n>\d+)(?:_[^.]*)?\.h5$')
+                match = pattern.match(param)
+                if not match:
+                    continue
+                sim_id = match.group("base")
+                n_value = int(match.group("n"))
+                if sim_id not in grouped:
+                    grouped[sim_id] = []
+                grouped[sim_id].append((param, n_value))
+                
+            elif opts.group == 'Extra-Ecc-30' or opts.group == 'eBBH-30' or opts.group == 'New-Targeted-Ecc' or opts.group == 'GW200208_22-targeted' or opts.group == 'GW190521-followup' or opts.group == 'additional':
+                #files named as CFL0.45_D12.56_q0.1170_a1_0.0_a2_0.0_f0.00_eta1_n120.h5 or  CFL0.45_D12.56_q0.1170_a1_0.0_a2_0.0_f0.00_eta1_n120_8rfl.h5
+                pattern = re.compile(r'^(?P<base>.+?)_n(?P<n>\d+)(?:_[^.]*)?\.h5$')
+                match = pattern.match(param)
+                if not match:
+                    continue
+                sim_id = match.group("base")
+                n_value = int(match.group("n"))
+                if sim_id not in grouped:
+                    grouped[sim_id] = []
+                grouped[sim_id].append((param, n_value))
+                
+            elif opts.group == 'eBBH-extened' or opts.group == 'eBBH-extend':
+                #files named as D17.10_q1.00_a1_-0.33_a2_-0.33_f0.00_opt_eta1_CFL0.45_n120.h5 or D17.10_q1.00_a1_-0.33_a2_-0.33_f0.00_opt_9rfl_eta1_CFL0.45_n120.h5
+                pattern = re.compile(r'^(?P<base>.+?)_n(?P<n>\d+)(?:_[^.]*)?\.h5$')
+                match = pattern.match(param)
+                if not match:
+                    continue
+                sim_id_raw = match.group("base")
+                n_value = int(match.group("n"))
+                sim_id = sim_id_raw.replace("_9rfl", "")
+                if sim_id not in grouped:
+                    grouped[sim_id] = []
+                grouped[sim_id].append((param, n_value))
+                
+        # filter simulation list to take only opts.optimal_res resolution simulations when there are multiple resolutions for the same simulation
+        # when opts.optimal_res not available takes highest nXXX resolution avaliable
+        for sim_id, entries in grouped.items():
+            print(sim_id, entries)
+            rfl_pattern = re.compile(r'_\d+rfl')
+            nxxx_no_rfl = [e for e in entries if e[1] == opts.optimal_res and not rfl_pattern.search(e[0])]
+            if opts.debug_PM:
+                print(fr"{opts.optimal_res}_no_rfl {nxxx_no_rfl}")
+            nxxx_with_rfl = [e for e in entries if e[1] == opts.optimal_res and rfl_pattern.search(e[0])]
+            if opts.debug_PM:
+                print(fr"{opts.optimal_res}with_rfl {nxxx_with_rfl}")
+            if nxxx_with_rfl:
+                # Keep the first opts.optimal_res match
+                res_sorted_sim_list.append(nxxx_with_rfl[0][0])
+            elif nxxx_no_rfl:
+                # Keep the first opts.optimal_res match
+                res_sorted_sim_list.append(nxxx_no_rfl[0][0])
+            else:
+                # if opts.optimal_res not available, keep highest resolution available
+                highest = max(entries, key=lambda x: x[1])
+                res_sorted_sim_list.append(highest[0])
+        if opts.debug_PM:        
+            #print("res_sorted_sim_list",res_sorted_sim_list)
+            with open("res_sorted_sim_list.txt", "w") as file:
+                file.write("\n".join(res_sorted_sim_list))
+            with open('grouped.json', 'w') as json_file:
+                json.dump(grouped, json_file, indent=4)
+        print('length after removing duplicate resolutions',len(res_sorted_sim_list))
+        param_list = res_sorted_sim_list
+
+    if not opts.remove_duplicate_res:
+        param_list = nrwf.internal_ParametersAvailable[group]
+    for param in param_list:
+    #for param in nrwf.internal_ParametersAvailable[group]:
      print("  -> ", group, param)
      try:
         wfP = nrwf.WaveformModeCatalog(group,param,metadata_only=True)
@@ -406,6 +499,8 @@ if len(P_list_NR)<1:
     print(" No simulations")
     sys.exit(0)
 
+if opts.debug_PM:
+    print(P_list_NR[0].print_params())
 
 ###
 ### Define parameter ranges to be changed
