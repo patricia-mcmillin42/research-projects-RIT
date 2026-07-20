@@ -22,7 +22,7 @@ def corner(xs, bins=20, range=None, weights=None, color="k",
            no_1d=True,
            labels=None, label_kwargs=None,
            show_titles=False, title_fmt=".2f", title_kwargs=None,
-           truths=None, truth_color="#4682b4",
+           truths=None, truth_color="#4682b4",nr_plots=False,
            scale_hist=False, quantiles=None, verbose=False, fig=None,
            max_n_ticks=5, top_ticks=False, use_math_text=False, reverse=False,
            hist_kwargs=None, **hist2d_kwargs):
@@ -338,13 +338,16 @@ def corner(xs, bins=20, range=None, weights=None, color="k",
                    color=color, smooth=smooth, bins=[bins[j], bins[i]],
                    **hist2d_kwargs)
 
-            if truths is not None:
+            if truths is not None and nr_plots is False:
                 if truths[i] is not None and truths[j] is not None:
                     ax.plot(truths[j], truths[i], "s", color=truth_color)
                 if truths[j] is not None:
                     ax.axvline(truths[j], color=truth_color)
                 if truths[i] is not None:
                     ax.axhline(truths[i], color=truth_color)
+            elif truths is not None and nr_plots is True:
+                if truths[i] is not None and truths[j] is not None:
+                    ax.plot(truths[j], truths[i], "*",markersize=14, markerfacecolor='none', color=truth_color)
 
             if max_n_ticks == 0:
                 ax.xaxis.set_major_locator(NullLocator())
