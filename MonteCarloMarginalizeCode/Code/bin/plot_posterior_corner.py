@@ -284,22 +284,35 @@ parser.add_argument("--supplementary-coordinate-output-parameter", action='appen
                          "Repeat for each output column. If omitted, the plugin's CHARTS[chart] "
                          "parameters / OUTPUT_PARAMETERS attribute is used.")
 parser.add_argument("--verbose",action='store_true',help='print matplotlibrc data')
+parser.add_argument("--nr-plots",action='store_true',help='print matplotlibrc data')
 opts=  parser.parse_args()
 
 plt.rc('axes',unicode_minus=False)
 dpi_base=200
 if not(opts.matplotlib_block_defaults):
     legend_font_base=16
-    rc_params = {'backend': 'ps',
-             'axes.labelsize': 11,
-             'axes.titlesize': 10,
-             'font.size': 11,
-             'legend.fontsize': legend_font_base,
-             'xtick.labelsize': 11,
-             'ytick.labelsize': 11,
-             #'text.usetex': True,
-             'font.family': 'Times New Roman'}#,
-             #'font.sans-serif': ['Bitstream Vera Sans']}#,
+    if not opts.nr_plots:
+        rc_params = {'backend': 'ps',
+                 'axes.labelsize': 11,
+                 'axes.titlesize': 10,
+                 'font.size': 11,
+                 'legend.fontsize': legend_font_base,
+                 'xtick.labelsize': 11,
+                 'ytick.labelsize': 11,
+                 #'text.usetex': True,
+                 'font.family': 'Times New Roman'}#,
+                 #'font.sans-serif': ['Bitstream Vera Sans']}#,
+    else:
+        rc_params = {'backend': 'ps',
+                 'axes.labelsize': 22,
+                 'axes.titlesize': 22,
+                 'font.size': 22,
+                 'legend.fontsize': 22,
+                 'xtick.labelsize': 18,
+                 'ytick.labelsize': 18,
+                 #'text.usetex': True,
+                 'font.family': 'Times New Roman'}#,
+                 #'font.sans-serif': ['Bitstream Vera Sans']}#,
     if opts.publication:
         rc_params.update( {'savefig.bbox':'tight',
                            'font.family':'serif',
@@ -529,8 +542,12 @@ if opts.use_legend and opts.posterior_label:
         my_line = mlines.Line2D([],[],color=color_list[indx],linestyle=linestyle_list[indx],label=opts.posterior_label[indx])
         line_handles.append(my_line)
 
-    corner_legend_location=(0.7, 1.0)
-    corner_legend_prop = {'size':8}
+    if not opts.nr_plots:
+        corner_legend_location=(0.7, 1.0)
+        corner_legend_prop = {'size':8}
+    else:
+        corner_legend_location=(0.85, 2.1)
+        corner_legend_prop = {'size':10}
 # https://stackoverflow.com/questions/7125009/how-to-change-legend-size-with-matplotlib-pyplot
 #params = {'legend.fontsize': 20, 'legend.linewidth': 2}
 #plt.rcParams.update(params)
@@ -1092,8 +1109,13 @@ if composite_list:
     # Grayscale, using all points
     if opts.use_all_composite_but_grayscale:
         fig_base = our_corner.corner(dat_mass_orig,range=range_list, plot_datapoints=True,weights=np.ones(len(dat_mass_orig))*1.0/len(dat_mass_orig), plot_density=False, no_fill_contours=True, plot_contours=False,contours=False,levels=None,fig=fig_base,data_kwargs={'color':'0.5','s':1})
+    elif opts.nr_plots:
+        print(f'taking {dat_mass[-1]} as the peak lnL simulation')
+        np.savetxt("peak_lnL_point.txt",dat_mass[-1].reshape(1, -1),header=" ".join(param_list),comments='#',delimiter=" ")
+        fig_base = our_corner.corner(dat_mass,range=range_list, plot_datapoints=True,weights=np.ones(len(dat_mass))*1.0/len(dat_mass), truths = dat_mass[-1],truth_color='navy', nr_plots=True,plot_density=False, no_fill_contours=True, plot_contours=False,contours=False,levels=None,fig=fig_base,data_kwargs={'color':my_cmap_values, 's':1})
     # Color scale with colored points
-    fig_base = our_corner.corner(dat_mass,range=range_list, plot_datapoints=True,weights=np.ones(len(dat_mass))*1.0/len(dat_mass), plot_density=False, no_fill_contours=True, plot_contours=False,contours=False,levels=None,fig=fig_base,data_kwargs={'color':my_cmap_values, 's':1}, truths=truths_here)
+    else:
+        fig_base = our_corner.corner(dat_mass,range=range_list, plot_datapoints=True,weights=np.ones(len(dat_mass))*1.0/len(dat_mass), plot_density=False, no_fill_contours=True, plot_contours=False,contours=False,levels=None,fig=fig_base,data_kwargs={'color':my_cmap_values, 's':1}, truths=truths_here)
 
     # Create colorbar mappable
 #    ax=plt.figure().gca()
@@ -1137,3 +1159,20 @@ res_base = len(opts.parameter)*dpi_base
 if not(opts.matplotlib_block_defaults):
     matplotlib.rcParams.update({'font.size': 11+int(len(opts.parameter)), 'legend.fontsize': legend_font_base+int(1.3*len(opts.parameter))})   # increase font size if I have more panels, to keep similar aspect
 plt.savefig("corner_"+param_postfix+fig_extension,dpi=res_base)        # use more resolution, to make sure each image remains of consistent quality
+
+### add colorbar
+new_ax = fig_base.gca()
+box = new_ax.get_position()
+new_ax.set_position([box.x0, box.y0, box.width * 0.85, box.height])
+cax = fig_base.add_axes([box.x0 + box.width * 0.9, box.y0, 0.03, box.height * 2])
+norm = plt.Normalize(vmin=opts.lnL_cut, vmax=max(lnL))
+sm = plt.cm.ScalarMappable(cmap='jet', norm=norm)
+sm.set_array([])
+# Add the colorbar to the new axis
+colorbar = fig_base.colorbar(sm, cax=cax)
+colorbar.ax.set_title(r'$\ln \mathcal{L}$', pad=10)
+from matplotlib.ticker import MaxNLocator
+#colorbar.locator = MaxNLocator(integer=True)
+colorbar.locator = MaxNLocator()
+colorbar.update_ticks()
+plt.savefig("corner_plus_colorbar.png",bbox_inches='tight',pad_inches=0.1)
