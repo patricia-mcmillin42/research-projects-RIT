@@ -64,6 +64,8 @@ distance posterior.
   thread cap (`pthread_create ... EAGAIN`); `reconstruct.sh` runs them
   sequentially.  On a cluster, submit under condor instead (see ../README.md and
   `../make_reconstruct_subfile.sh`).
+* in `reconstruct.sh` can include `--flow-label` for studies of the same event at
+  multiple `flow` values, this option includes `flow` value in the plot title.
 
 ## Reference figure
 

@@ -78,6 +78,7 @@ def get_args(argv=None):
     ap.add_argument("--thi", type=float, default=0.06)
     ap.add_argument("--out", required=True)
     ap.add_argument("--cache-out", default=None)
+    ap.add_argument("--flow-label", action="store_true",help="include flow in plot title")
     ap.add_argument("--align", action="store_true",
                     help="DIAGNOSTIC ONLY. You should NOT need this. A visible offset "
                          "means the samples lack per-sample times (the ILE run was missing "
@@ -288,13 +289,17 @@ def main(argv=None):
             m = (td >= -0.06) & (td <= 0.04); tdp = td[m][np.argmax(np.abs(hd[m]))]
             gm = (g >= -0.06) & (g <= 0.04); tmp = g[gm][np.argmax(np.abs(md[gm]))]
             g = g + (tdp - tmp)
-        ax.fill_between(g, up, dn, color="tab:green", alpha=0.35, label="%s 90%% band" % o.sim_id)
+        ax.fill_between(g, up, dn, color="tab:green", alpha=0.35, label="%s 90\\%% band" % o.sim_id)
         ax.plot(g, md, color="tab:green", lw=1.6, alpha=0.9)
         ax.set_xlim(o.tlo, o.thi); ax.set_ylabel("whitened strain"); ax.legend(loc="lower left")
         ax.text(0.5, 0.92, labels.get(ifo, ifo), ha="center", transform=ax.transAxes)
     neff = 1.0 / np.sum(wsel ** 2)
-    fig.suptitle("%s : whitened strain and %s 90 pct band  (N=%d, eff=%d)"
-                 % (o.event_name, o.sim_id, len(wsel), neff), fontsize=14, y=0.998)
+    if o.flow_label:
+        fig.suptitle("%s at $f_{\rm{low}}=%d$ Hz: whitened strain and %s 90\\%% band  (N=%d, eff=%d)"
+                 % (o.event_name, o.flow,o.sim_id, len(wsel), neff), fontsize=14, y=0.998)
+    else:
+        fig.suptitle("%s: whitened strain and %s 90\\%% band  (N=%d, eff=%d)"
+                 % (o.event_name,o.sim_id, len(wsel), neff), fontsize=14, y=0.998)
     axes[-1].set_xlabel("time (s) from %.6f" % o.event_time)
     plt.tight_layout()
     plt.savefig(o.out, bbox_inches="tight", dpi=110)

@@ -49,3 +49,14 @@ POOL=""; for f in "$WORKDIR"/ile_fd_*_compact.npz; do POOL="$POOL --samples $f";
   --nproc "${NPROC:-8}" --tlo "${TLO:--0.10}" --thi "${THI:-0.06}" \
   --out "$OUT_PNG"
 echo "=== reconstruction written: $OUT_PNG ==="
+
+# pool everything and reconstruct
+## use below when same event is analyzed at multiple flow values, includes flow in plot title
+#POOL=""; for f in "$WORKDIR"/ile_fd_*_compact.npz; do POOL="$POOL --samples $f"; done
+#"$PYBIN" "$HERE/../reconstruct_strain.py" $POOL --fair-draw \
+#  --group "$NR_GROUP" --nr-param "$NR_PARAM" $PLOT_PSD_ARGS \
+#  --event-time "$EVENT_TIME" --event-name "$EVENT_NAME" --sim-id "$SIM_ID" \
+#  --srate "$SRATE" --flow "$FLOW" ${INTRINSIC:+--intrinsic $INTRINSIC} \
+#  --nproc "${NPROC:-8}" --tlo "${TLO:--0.10}" --thi "${THI:-0.06}" --flow-label\
+#  --out "$OUT_PNG"
+#echo "=== reconstruction written: $OUT_PNG ==="
