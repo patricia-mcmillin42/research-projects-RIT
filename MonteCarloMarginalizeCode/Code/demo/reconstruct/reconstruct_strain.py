@@ -295,7 +295,7 @@ def main(argv=None):
         ax.text(0.5, 0.92, labels.get(ifo, ifo), ha="center", transform=ax.transAxes)
     neff = 1.0 / np.sum(wsel ** 2)
     if o.flow_label:
-        fig.suptitle("%s at $f_{\rm{low}}=%d$ Hz: whitened strain and %s 90\\%% band  (N=%d, eff=%d)"
+        fig.suptitle("%s at $f_{{\\rm{low}}}=%d$ Hz: whitened strain and %s 90\\%% band  (N=%d, eff=%d)"
                  % (o.event_name, o.flow,o.sim_id, len(wsel), neff), fontsize=14, y=0.998)
     else:
         fig.suptitle("%s: whitened strain and %s 90\\%% band  (N=%d, eff=%d)"
