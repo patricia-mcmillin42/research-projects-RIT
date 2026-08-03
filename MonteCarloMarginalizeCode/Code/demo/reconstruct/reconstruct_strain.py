@@ -289,7 +289,7 @@ def main(argv=None):
             m = (td >= -0.06) & (td <= 0.04); tdp = td[m][np.argmax(np.abs(hd[m]))]
             gm = (g >= -0.06) & (g <= 0.04); tmp = g[gm][np.argmax(np.abs(md[gm]))]
             g = g + (tdp - tmp)
-        ax.fill_between(g, up, dn, color="tab:green", alpha=0.35, label="%s 90\\%% band" % o.sim_id)
+        ax.fill_between(g, up, dn, color="tab:green", alpha=0.35, label="%s 90\\%% CI" % o.sim_id)
         ax.plot(g, md, color="tab:green", lw=1.6, alpha=0.9)
         ax.set_xlim(o.tlo, o.thi); ax.set_ylabel("whitened strain"); ax.legend(loc="lower left")
         ax.text(0.5, 0.92, labels.get(ifo, ifo), ha="center", transform=ax.transAxes)
