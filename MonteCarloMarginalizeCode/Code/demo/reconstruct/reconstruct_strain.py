@@ -295,11 +295,15 @@ def main(argv=None):
         ax.text(0.5, 0.92, labels.get(ifo, ifo), ha="center", transform=ax.transAxes)
     neff = 1.0 / np.sum(wsel ** 2)
     if o.flow_label:
-        fig.suptitle("%s at $f_{{\\rm{low}}}=%d$ Hz: whitened strain and %s 90\\%% band  (N=%d, eff=%d)"
-                 % (o.event_name, o.flow,o.sim_id, len(wsel), neff), fontsize=14, y=0.998)
+#        fig.suptitle("%s at $f_{{\\rm{low}}}=%d$ Hz: whitened strain and %s 90\\%% band  (N=%d, eff=%d)"
+#                 % (o.event_name, o.flow,o.sim_id, len(wsel), neff), fontsize=14, y=0.998)
+        fig.suptitle("%s at $f_{{\\rm{ref}}}=%d$ Hz: whitened strain and %s 90\\%% credible interval  (N=%d)"
+                 % (o.event_name,o.sim_id, len(wsel)), fontsize=14, y=0.998)      
     else:
-        fig.suptitle("%s: whitened strain and %s 90\\%% band  (N=%d, eff=%d)"
-                 % (o.event_name,o.sim_id, len(wsel), neff), fontsize=14, y=0.998)
+#        fig.suptitle("%s: whitened strain and %s 90\\%% band  (N=%d, eff=%d)"
+#                 % (o.event_name,o.sim_id, len(wsel), neff), fontsize=14, y=0.998)
+        fig.suptitle("%s: whitened strain and %s 90\\%% credible interval  (N=%d)"
+                 % (o.event_name,o.sim_id, len(wsel)), fontsize=14, y=0.998)
     axes[-1].set_xlabel("time (s) from %.6f" % o.event_time)
     plt.tight_layout()
     plt.savefig(o.out, bbox_inches="tight", dpi=110)
