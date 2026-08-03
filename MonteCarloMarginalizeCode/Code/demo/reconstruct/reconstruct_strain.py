@@ -298,7 +298,7 @@ def main(argv=None):
 #        fig.suptitle("%s at $f_{{\\rm{low}}}=%d$ Hz: whitened strain and %s 90\\%% band  (N=%d, eff=%d)"
 #                 % (o.event_name, o.flow,o.sim_id, len(wsel), neff), fontsize=14, y=0.998)
         fig.suptitle("%s at $f_{{\\rm{ref}}}=%d$ Hz: whitened strain and %s 90\\%% credible interval  (N=%d)"
-                 % (o.event_name,o.sim_id, len(wsel)), fontsize=14, y=0.998)      
+                 % (o.event_name,o.flow,o.sim_id, len(wsel)), fontsize=14, y=0.998)      
     else:
 #        fig.suptitle("%s: whitened strain and %s 90\\%% band  (N=%d, eff=%d)"
 #                 % (o.event_name,o.sim_id, len(wsel), neff), fontsize=14, y=0.998)
