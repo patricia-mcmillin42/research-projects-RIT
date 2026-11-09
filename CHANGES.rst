@@ -1,68 +1,127 @@
+Release branches and maintenance policy
+=======================================
+
+**For the stable release line, use ``rift_O4c``, not ``main`` or ``master``.**
+
+The ``0.0.17.xx`` series will continue to be developed and maintained on
+``rift_O4c``.  This is a compartmentalized maintenance line: it will not be
+a descendant of ``master``, and there is no plan to merge the two lines.
+The accumulated divergence makes a wholesale merge impractical.  Relevant
+fixes must be assessed and adapted for each branch separately.
+
+The ``0.0.18.xx`` development line is ``rift_O4d``.  Ongoing short-author
+research analyses and new scientific development use this development line.
+Users seeking the stable branch should explicitly select ``rift_O4c``;
+the repository's default branch name is not a stability recommendation.
+Record the exact branch, commit, environment and analysis settings for
+reproducibility.
 
 0.0.18.0
 ------------
-development tree is rift_O4d.
-  - (rc0) O4d base refresh, from rift_O4c to rift_O4d: Python/numpy CI modernization (py3.10-py3.13,
-    numpy 2.x checks), Asimov/RIFT smoke tests, docs deployment, pluggable workflow backends and
-    simulation-manager prototypes, distance-grid/distance-slice likelihood export, container-family and pixi/SWIG
-    canaries, hyperpipeline ASCII workflow support, parsimonious-placement preview, EFPE and standalone NR-frame
-    utilities, plot_RIFT diagnostics, and GPU/CuPy portability fixes.
+development tree is rift_O4d; PRs refer to oshaughn/research-projects-RIT.
 
-** (rc1)
-  - parsimonious-placement (preview): new RIFT.misc.tracer_placement engine (SMC+MALA, birth-death,
-    and SMC-MALA+BD samplers; pluggable RF / RBF / polynomial / quadratic fits) plus two
-    opt-in CLI tools that mirror the existing puffball tools' I/O contract:
-    util_HyperparameterTracerUpdate.py (hyperpipe drop-in for util_HyperparameterPuffball.py)
-    and util_ParameterTracerUpdate.py (event-level drop-in for util_ParameterPuffball.py).
-    Default behavior preserves the existing pipelines (the new tools are not invoked unless
-    the user points --puff-exe at them); both also accept --update-method puffball as an
-    exact-regression fallback. See
-    https://git.ligo.org/rapidpe-rift/rift/-/merge_requests/ (TBD) and the project notes at
-    20260513-Me-ParsimoniousPlacementOptions/parsimonious_placement_plan.md.
-  - generic worfklow backend (condor, slurm, htcondor, etc) via dag_utils_generic
-  - simulation_manager framework: interface requirements for external adaptive simulations
-  - CIP hyperpipe improvements (initialize_me; enable population and EOS params in using_eos file with arbitrary
-    labelled parameters; arbitrary coordinates); CIP xgboost gp fit (from Aasim); install make 'precession' optional; see also 0.0.17.4rc0
-    igwn-ligolw. Hyperpipe 'omegaconf/hydra' framework
-  - parsimonious placement (preview): new RIFT.misc.tracer_placement engine package (SMC+MALA / birth-death /
-    SMC-MALA+BD samplers with pluggable RF / RBF / polynomial / quadratic surrogate fits) plus two thin
-    command-line drivers, bin/util_HyperparameterTracerUpdate.py (hyperpipe, .dat I/O) and
-    bin/util_ParameterTracerUpdate.py (event-level, XML I/O via lalsimutils). Both are drop-in alternatives to
-    util_HyperparameterPuffball.py / util_ParameterPuffball.py: legacy default behavior is unchanged --- the new
-    tools are only invoked when --puff-exe points at them. create_eos_posterior_pipeline gains
-    --tracer-only-marg and --tracer-final-marg-iterations to optionally skip MARG_* (posterior) nodes in
-    intermediate iterations and rely on MARG_PUFF (placement) jobs alone, recovering MARG only for the final N
-    iterations. util_RIFT_hyperpipe.py forwards the same flags via arch.tracer-only-marg /
-    arch.tracer-final-marg-iterations and exposes a puff.settings: block mirroring post.settings: so tracer
-    sampler hyperparameters can be set declaratively in Hydra. See
-    20260513-Me-ParsimoniousPlacementOptions/parsimonious_placement_plan.md for theory, prototype results,
-    rollout plan, and references.
-  - distance grid creation and (AD-compatible) fit
-  - RiftFloat wrapper for portability across platforms with modern python/numpy
-  - ascii data format; waveforms (epfe);  container auto-selection framework ; cepp_alternate now feature-parity;
-    mcsamplerEnsemble full GPU path
-  - demos: calmarg, lisa, distance grids, likelihood export, multiple GPU use, hyperpipe
-  - tools: importing cal posteriors from other codes
-  - (rc1 pending) In-loop calibration marginalization: move calibration draws into ILE, add loop and fused
-    GPU kernels (including distance-marginalized and phase-marginalized paths), export cal/time diagnostics,
-    account for calibration Monte-Carlo error in reported uncertainty, add adaptive/pilot calibration proposal
-    scaffolding, and include a runnable calmarg demo with OSG/container transfer fixes.
-  - (rc1 pending) Extrinsic proposal handoff and sampler robustness: save and consolidate extrinsic GMM
-    breadcrumbs across iterations, seed later ILE jobs from those proposals, add GMM proposal/adaptation
-    controls and diagnostics, improve log-domain covariance/ESS handling, and thread the cal/extrinsic seed
-    barriers through CEPP/puffball workflows.
-  - Likelihood export Differentiable JAX likelihood/export work: optional jax_gp interpolators, differentiable
-    export artifacts, quad-GP and RF/GP validation tooling, jax_cip experiments
-  - JAX ILE driver with AD-compatible extrinsic likelihood, distance/phase marginalization, network coordinates, and gradient-aware
-    samplers. These remain optional extras and are skipped by base CI when JAX is not installed.
-  -  LISA support: add a LISA compatibility layer, response import path, standalone helper
-    contract, LISA ILE scaffold, and synthetic operational/import tests.
-  - EOS/coordinate and workflow updates: add NMB/PCA/tabular EOS sequence dispatch and
-    single-EOS-index evidence support, coordinate-plugin hooks for posterior plotting and puffing, Morisaki-frame
-    and aligned-spin coordinate helpers for GP/JAX studies, container-universe/OSDF scitokens support, and
-    per-machine container image selection.
-  - ILE 'fanout' submission can use multiple GPUs on one host (RIFT_ILE_GPU_FANOUT)
-  - Qlm interpolated in factored_likelihood...NoLoop (option)
+   - Opt-in mu/random-transverse puffing for the first CIP batch, with an atomic
+     vectorized mass/aligned-spin inverse and independent random transverse redraws.
+     Later batches retain internal-puff-transverse covariance puffing; BasicIteration
+     accepts a puff argument schedule paired with the CIP batch schedule. Default
+     puff behavior is unchanged.
+
+   - Correct the CIP delta_mc prior Jacobian: with delta_mc sampled, raw CIP lnZ decreases by
+     ln(4).  Posteriors and prior-normalized lnB_H do not change; reconcile older raw lnZ
+     before reuse (fork PR #522).
+   - Divide the CIP q prior by its --eta-range norm factor N: (mtot, q) runs on the default q
+     prior gain -2 ln(N) in raw lnZ.  Posteriors and prior-normalized lnB_H do not change
+     (fork PR #523).
+
+   - (rc0) O4d base refresh: modern Python/numpy support, portable GPU execution, generic workflow
+     backends, hyperpipe and simulation-manager support; distance-likelihood export, parsimonious
+     placement preview, waveform utilities and diagnostics (PRs #129, #132, #135, #143).
+   - (rc1) In-loop calibration marginalization and extrinsic proposal handoff; differentiable JAX
+     likelihood/ILE, LISA support, EOS/coordinate extensions, multi-GPU fanout and hyperpipe improvements.
+     Unified time-marginalization grids change lnL relative to archived runs (PRs #139, #144, #154).
+   - (rc2) Portfolio/AV/GMM sampler robustness, high-SNR rescue and warm starts; evidence/error and
+     posterior-export fixes; slow-rotation/finite-size detector response and optional JAX sampling.
+     Improved convergence tests, calibration, waveform conditioning, workflows and posterior-shape
+     validation (PRs #155, #161, #170).
+   - (rc3) Adaptive time/distance and joint angular marginalization; multi-approximant support,
+     continuous-time posterior export, Rimsky orchestration and container integration. Fix CIP evidence
+     normalization, distance tails and waveform handling; strengthen calibration and CI checks
+     (PRs #159, #173, #178, #188). JAX flow reuse is now off by default (opt-in via --flow-reuse);
+     JAX --save-samples now exports fair posterior draws.
+   - (rc4) JAX ILE gains an opt-in, fail-closed four-axis direct-marginalization policy,
+     peak-local time/distance/angle planning with exact or band-limited reserve rules, and
+     device-aware batching/pregridding.  Add value-only JAX adaptive-volume and portfolio sampling,
+     phase-rotated coordinates, persistent compilation caching, and Asimov selection.  Correct
+     importance-proposal regularization and refuse non-finite or implausible evidence before result
+     publication.  Extend slow-rotation/finite-size response support and cross-term batching; expand
+     CPU/JAX regression and CI-roster coverage (fork PRs #214, #245, #247, #255, #268, #270,
+     #274, #280--#285, #294, #301--#315, #319).
+   - (rc5) JAX ILE now honors production pseudo-pipe controls for the distance prior,
+     internal sample rate, mode retention, detector cutoffs, PSD conditioning and time
+     interpolation; unsupported AV priors fail before likelihood construction.  Repair
+     JAX fair-draw terminal conversion, bounded multipeak marginalization and adaptive-
+     volume bounds.  Add opt-in response-order selection, component-normalized bounded
+     GMM scoring and zero-likelihood SMC accounting.  GPU compound precompute now uses
+     conservative workspace defaults and supports device-resident waveform/likelihood
+     handoff, with expanded GPU/JAX regression and contract coverage (fork PRs #325,
+     #328, #330--#332).
+
+   - (rc6) Correct ILE angle-prior normalization: lnZ decreases by ln(2), or ln(8)
+     with --internal-rotate-phase; reconcile old likelihood tables before reuse.
+     Fix zero-weight evidence accounting, proposal-density/portfolio contracts, spin priors,
+     posterior exports and CPU/GPU sampler compatibility.  Align calibration waveforms with ILE,
+     including FD frame, alignment and typed LALSuite options; precessing XPHM/XO4a reweightings change.
+     Add reviewed LALSimulation multibranch EOS support with explicit branch selection;
+     fixed-EOS CIP now rejects masses outside published EOS support.  Repair JAX terminal conversion,
+     distance priors, sky/spin/redshift coordinates, hyperpipe coordinate passing and multi-row CIP.
+     Add Asimov 0.8 compatibility; fix container transfers, disk requests and failure propagation.
+     Add Bilby-compatible noise evidence and opt-in GPU GP, AV stopping and RF spin features;
+     expand numerical, workflow and CPU/GPU regression coverage (PR #208).
+
+   - (unreleased) Time marginalization uses the same rule on CPU and GPU.  'simpson' is now
+     scipy's rule on every backend, so GPU lnL at even npts (srate 4096/8192) moves by up to
+     0.405 nats onto the CPU value; CPU results are unchanged.  New opt-in
+     --time-marginalization-quadrature trapezoid (NoLoop only; refused with --use-jax-ile).
+     Supersedes fork PR #204.
+
+   - (unreleased) Fork PR #435 retires the physics3 RF transverse-spin mode, which
+     gave CIP 11 fit coordinates for 8 degrees of freedom; every layer now refuses it.
+     `auto` and Asimov `true` select geometric4; `auto` leaves fixed-EOS, EOB-parameter
+     and hyperbolic analyses unchanged.
+
+   - (rc6 detail) Additional JAX terminal-output and EOS support updates
+     (fork PR #213).
+     The terminal pseudo-pipe stage now recognizes JAX-ILE's tabular fair-draw
+     sidecars and joins them to the paired intrinsic likelihood records.  It no
+     longer sends JAX output through the XML-only converter, which could exit
+     successfully while producing a header-only posterior.
+     EOSManager reads the reviewed LALSimulation multipart/multibranch TOV interface
+     where the installed build provides it.  Released LALSimulation and
+     NuclearMatter-Backend sequence paths are unchanged where it does not.  Twin-star
+     masses require an explicit branch.  Branch-aware M-R-Lambda curves no longer
+     collapse stable branches.  Fixed-EOS CIP callers can load reviewed tables with
+     ``lalsim_file:<path>`` and pick a family once with ``--using-eos-branch``; the
+     legacy ``lambda_from_m(m)`` surface is retained.  **CHANGES CIP SUPPORT**: with a
+     fixed EOS, CIP now rejects draws outside the EOS's mass support before the
+     likelihood fit, unconditionally rather than only under
+     ``--protect-coordinate-conversions``.  The test is made on the sampled masses
+     against ``mMinMsun``/``mMaxMsun``, honouring ``--no-matter1``/``--no-matter2``.
+     Testing the converted coordinates instead was not enough: with a mass-only fit
+     basis the EOS's flag rides in lambda, which the conversion discards.  An EOS that
+     publishes neither bound is unaffected.
+
+0.0.17.12
+---------
+MR https://git.ligo.org/rapidpe-rift/rift/-/merge_requests/54  , for eccentricity prior (log-uniform)
+
+0.0.17.11
+---------
+MR https://git.ligo.org/rapidpe-rift/rift/-/merge_requests/53  , so user can specify the bootstrap file in asimov yaml
+
+0.0.17.10
+------------
+MR https://git.ligo.org/rapidpe-rift/rift/-/merge_requests/51 , https://git.ligo.org/rapidpe-rift/rift/-/merge_requests/49
+so output sampling rate is precisely what is requested
 
 0.0.17.9
 ------------
@@ -70,7 +129,9 @@ development tree is rift_O4c_staging -> rift_O4c; draft MR notes at
 https://git.ligo.org/rapidpe-rift/rift/-/merge_requests/49
    - (rc0) write_bilby_pickle: shutil.copyfile threw error if cache file already existed (copy into same file error) in
      code that protected against duplicate IFO entries.
-
+   - (rc1) V calibration convention sign (rapidpe-rift/rift!50); multi-container capability; multi-GPU 'fanout' capability
+release is rc1
+     
 
 0.0.17.8
 ------------

@@ -121,8 +121,10 @@ from time import time
 from hashlib import md5
 
 import shutil
+import shlex
 
 import numpy as np
+from RIFT.misc.argument_quoting import _double_up_quotes, quote_arguments, safely_quote_arg_str
 import configparser
 
 # Container family manifest support (Feature: multi-architecture container
@@ -139,6 +141,10 @@ try:
         build_capability_defined_requirement,
         build_fallback_single_image,
         build_runtime_selection_wrapper,
+        has_ile_profiles,
+        build_request_memory_expr,
+        build_ile_exe_expr,
+        build_profile_label_expr,
         ContainerManifestError,
     )
     _HAVE_CONTAINER_MANIFEST = True
@@ -350,7 +356,10 @@ def ile_gpu_request():
         return (1, 1)
 
 
-def ile_invocation_shell(exe, fanout=None):
+ILE_EXE_ARG = '--rift-ile-exe='
+
+
+def ile_invocation_shell(exe, fanout=None, exe_from_arg=False):
     """Shell snippet invoking the ILE executable `exe` with multi-GPU fan-out
     (RIFT_ILE_GPU_FANOUT).  The launcher reads its source from stdin via a quoted
     here-doc, so the ILE arguments in "$@" (including nested-quoted values) pass
@@ -359,13 +368,28 @@ def ile_invocation_shell(exe, fanout=None):
     The build-time fan-out value is BAKED into ile_pre.sh as the runtime default
     (still overridable at runtime), so the job does not depend on the submit/
     execute environment propagating RIFT_ILE_GPU_FANOUT -- needed for asimov,
-    which can only set the value at DAG-build time."""
+    which can only set the value at DAG-build time.
+
+    With exe_from_arg, a ``--rift-ile-exe=<path>`` argument (added per matched
+    machine by a container family with ILE profiles) is removed from the ILE
+    arguments and replaces `exe`; without that argument `exe` runs."""
     if fanout is None:
         fanout = ile_gpu_fanout_value()
+    select = ''
+    exe_word = exe
+    if exe_from_arg:
+        select = (
+            'RIFT_ILE_EXE_SEL=""; RIFT_ILE_ARGS=()\n'
+            + 'for a in "$@"; do case "$a" in ' + ILE_EXE_ARG + '*) RIFT_ILE_EXE_SEL="${a#' + ILE_EXE_ARG
+            + '}";; *) RIFT_ILE_ARGS+=("$a");; esac; done\n'
+            + 'set -- ${RIFT_ILE_ARGS[@]+"${RIFT_ILE_ARGS[@]}"}\n'
+        )
+        exe_word = '${RIFT_ILE_EXE_SEL:-' + exe + '}'
     return (
-        'PY=python3; command -v python3 >/dev/null 2>&1 || PY=python\n'
+        select
+        + 'PY=python3; command -v python3 >/dev/null 2>&1 || PY=python\n'
         + 'export RIFT_ILE_GPU_FANOUT="${RIFT_ILE_GPU_FANOUT:-' + str(fanout) + '}"\n'
-        + 'exec "$PY" - "' + exe + '" "$@" <<\'RIFT_ILE_MULTIGPU_EOF\'\n'
+        + 'exec "$PY" - "' + exe_word + '" "$@" <<\'RIFT_ILE_MULTIGPU_EOF\'\n'
         + ILE_MULTIGPU_LAUNCHER_PY
         + '\nRIFT_ILE_MULTIGPU_EOF\n'
     )
@@ -384,36 +408,6 @@ def generate_job_id():
     r = str(int(np.random.random() * 100000000000000000))
     return md5((t + r).encode("utf-8")).hexdigest()
 
-
-def _double_up_quotes(instr):
-    return instr.replace("'", "''").replace('"', '""')
-
-
-def quote_arguments(args):
-    """Quote a string or list of strings using the Condor submit-file 'new' argument-quoting rules."""
-    if isinstance(args, str):
-        args_list = [args]
-    else:
-        args_list = args
-    quoted_args = []
-    for a in args_list:
-        qa = _double_up_quotes(a)
-        if " " in qa or "'" in qa:
-            qa = "'" + qa + "'"
-        quoted_args.append(qa)
-    return " ".join(quoted_args)
-
-
-def safely_quote_arg_str(arg_str):
-    if not ('"' in arg_str):
-        return quote_arguments
-    quote_breaks = arg_str.split('"')
-    if len(quote_breaks) != 3:
-        raise Exception(" Arg parsing: multiple quoted argument strings provided, not ready to handle ")
-    args0 = quote_arguments(quote_breaks[0].split())
-    args2 = quote_arguments(quote_breaks[2].split())
-    args1 = quote_arguments('"{}"'.format(quote_breaks[1]))
-    return "{} {} {}".format(args0, args1, args2)
 
 
 def bilby_ish_string_to_dict(my_str):
@@ -505,6 +499,7 @@ class _GenericJob(object):
         self.file_opts = []              # list of (name, value)        for file--opts
         self.var_opts = []               # variable opts (filled per-node from macros)
         self.arguments = []              # positional arguments
+        self.literal_argv = []           # argv tokens encoded only by the emitting backend
         self.environment = {}            # explicit env: dict of name -> value
         self.inherit_environment = False # condor's "getenv = True" / slurm's "--export=ALL"
         self.condor_cmds = []            # raw Condor submit-file commands (escape hatch / passthrough)
@@ -954,7 +949,7 @@ class WorkflowBackend(abc.ABC):
 
     # Defaults useful for sub-classes
     @staticmethod
-    def _build_argument_string(job, var_ref):
+    def _build_argument_string(job, var_ref, shell=False):
         """Render a job's argument list as a single command-line string.
 
         *var_ref* is a callable mapping a variable-opt name to whatever string
@@ -962,6 +957,8 @@ class WorkflowBackend(abc.ABC):
         Condor, ``"${event}"`` for Slurm).
         """
         parts = []
+        if job.literal_argv:
+            parts.append(shlex.join(job.literal_argv) if shell else quote_arguments(job.literal_argv))
         for name, value in job.opts:
             if value is None or value == "":
                 parts.append("--{}".format(name))
@@ -1164,6 +1161,15 @@ class GluePipelineBackend(WorkflowBackend):
             stderr_file = base + ".err"
         if stderr_file is not None:
             gjob.set_stderr_file(stderr_file)
+        if job.literal_argv:
+            encoded = quote_arguments(job.literal_argv)
+            # Keep literal ILE options before the per-node event macro, as in
+            # the historical glue writer. Other literal positional argv goes
+            # through add_arg; ILE's prefix always begins with a long option.
+            if encoded.startswith('--'):
+                gjob.add_opt(encoded[2:], '')
+            else:
+                gjob.add_arg(encoded)
         for n, v in job.opts:
             gjob.add_opt(n, v)
         for n, v in job.short_opts:
@@ -1327,7 +1333,7 @@ class SlurmBackend(WorkflowBackend):
             ev = "SLURM_VAR_" + re.sub(r"\W+", "_", name).upper()
             return "${" + ev + "}"
 
-        args = self._build_argument_string(job, slurm_var)
+        args = self._build_argument_string(job, slurm_var, shell=True)
         lines.append("")
         if not job.executable:
             raise RuntimeError("SlurmBackend.emit_job: job has no executable")
@@ -2110,7 +2116,7 @@ def write_CIP_single_iteration_subdag(cip_worker_job,it,unique_postfix,subdag_di
 
 
 
-def write_CIP_sub(tag='integrate', exe=None, input_net='all.net',output='output-ILE-samples',universe="vanilla",out_dir=None,log_dir=None, use_eos=False,ncopies=1,arg_str=None,request_memory=8192,request_memory_flex=False, arg_vals=None, no_grid=False,request_disk=False, transfer_files=None,transfer_output_files=None,use_singularity=False,use_osg=False,use_oauth_files=False,use_simple_osg_requirements=False,singularity_image=None,max_runtime_minutes=None,condor_commands=None,**kwargs):
+def write_CIP_sub(tag='integrate', exe=None, input_net='all.net',output='output-ILE-samples',universe="vanilla",out_dir=None,log_dir=None, use_eos=False,ncopies=1,arg_str=None,request_memory=8192,request_memory_flex=False,request_gpus=0,require_gpus=None, arg_vals=None, no_grid=False,request_disk=False, transfer_files=None,transfer_output_files=None,use_singularity=False,use_osg=False,use_oauth_files=False,use_simple_osg_requirements=False,singularity_image=None,max_runtime_minutes=None,condor_commands=None,**kwargs):
     """
     Write a submit file for launching jobs to marginalize the likelihood over intrinsic parameters.
 
@@ -2253,6 +2259,15 @@ def write_CIP_sub(tag='integrate', exe=None, input_net='all.net',output='output-
             ile_job.add_condor_cmd('environment', default_resolved_env)
         else:
             ile_job.add_condor_cmd('getenv', default_getenv_value)
+    if not isinstance(request_gpus, int) or request_gpus < 0:
+        raise ValueError("CIP request_gpus must be a nonnegative integer")
+    if request_gpus:
+        ile_job.add_condor_cmd('request_gpus', str(request_gpus))
+        ile_job.add_condor_cmd('request_cpus', '1')
+        if require_gpus:
+            ile_job.add_condor_cmd('require_gpus', str(require_gpus))
+    elif require_gpus:
+        raise ValueError("CIP require_gpus needs a positive GPU request")
     if not(request_memory_flex):
         ile_job.add_condor_cmd('request_memory', str(request_memory)+"M") 
     if request_memory_flex:
@@ -2308,7 +2323,7 @@ def write_CIP_sub(tag='integrate', exe=None, input_net='all.net',output='output-
            ile_job.add_condor_cmd("when_to_transfer_output",'ON_EXIT')
 
            # Stream log info
-           if not ('RIFT_NOSTREAM_LOG' in os.environ):
+           if not ('RIFT_NOSTREAM_LOG' in os.environ) and 'RIFT_NOSTREAM_LOG_CIP' not in os.environ:
                ile_job.add_condor_cmd("stream_error",'True')
                ile_job.add_condor_cmd("stream_output",'True')
 
@@ -2318,10 +2333,19 @@ def write_CIP_sub(tag='integrate', exe=None, input_net='all.net',output='output-
 
     ile_job.add_condor_cmd('requirements', '&&'.join('({0})'.format(r) for r in requirements))
 
-    # Stream log info: always stream CIP error, it is a critical bottleneck
-    if True: # not ('RIFT_NOSTREAM_LOG' in os.environ):
+    # Stream log info: always stream CIP error, it is a critical bottleneck (opt out: RIFT_NOSTREAM_LOG_CIP)
+    if 'RIFT_NOSTREAM_LOG_CIP' not in os.environ:
         ile_job.add_condor_cmd("stream_error",'True')
         ile_job.add_condor_cmd("stream_output",'True')
+
+    # Shared local images require an explicit local-pool opt-in for CIP too.
+    if os.environ.get('RIFT_CIP_FLOCK_LOCAL', '').lower() in ('1', 'true'):
+        ile_job.add_condor_cmd('MY.flock_local', 'true')
+    if os.environ.get('RIFT_CIP_POOLS'):
+        pools = os.environ['RIFT_CIP_POOLS']
+        if not all(c.isalnum() or c in '_,-' for c in pools):
+            raise ValueError('RIFT_CIP_POOLS must be a comma-separated pool list')
+        ile_job.add_condor_cmd('MY.POOLS', '"{}"'.format(pools))
 
     try:
         ile_job.add_condor_cmd('accounting_group',os.environ['LIGO_ACCOUNTING'])
@@ -2462,11 +2486,14 @@ def write_puff_sub(tag='puffball', exe=None, base=None,input_net='output-ILE-sam
     return ile_job, ile_sub_name
 
 
-def write_ILE_sub_simple(tag='integrate', exe=None, log_dir=None, use_eos=False,simple_unique=False,ncopies=1,arg_str=None,request_memory=4096,request_gpu=False,request_cross_platform=False,request_disk=False,arg_vals=None, transfer_files=None,transfer_output_files=None,use_singularity=False,use_osg=False,use_simple_osg_requirements=False,singularity_image=None,use_cvmfs_frames=False,use_oauth_files=False,frames_dir=None,cache_file=None,fragile_hold=False,max_runtime_minutes=None,condor_commands=None,**kwargs):
+def write_ILE_sub_simple(tag='integrate', exe=None, log_dir=None, use_eos=False,simple_unique=False,ncopies=1,arg_str=None,request_memory=4096,request_gpu=False,request_cross_platform=False,request_disk=False,arg_vals=None, transfer_files=None,transfer_output_files=None,use_singularity=False,use_osg=False,use_simple_osg_requirements=False,singularity_image=None,use_cvmfs_frames=False,use_oauth_files=False,frames_dir=None,cache_file=None,fragile_hold=False,max_runtime_minutes=None,condor_commands=None,ile_profiles=False,**kwargs):
     """
     Write a submit file for launching jobs to marginalize the likelihood over intrinsic parameters.
 
     Inputs:
+        - ile_profiles: opt in to the container family's per-entry ile_exe/request_memory,
+          selected per matched machine (GPU jobs only).  Never for jobs whose downstream
+          consumer depends on which executable ran (ILE_extr).
     Outputs:
         - An instance of the CondorDAGJob that was generated for ILE
     """
@@ -2494,9 +2521,22 @@ def write_ILE_sub_simple(tag='integrate', exe=None, log_dir=None, use_eos=False,
     singularity_image_expr = None
     singularity_transfer_expr = None
     singularity_require_gpus_floor = None
+    ile_profiles_active = False
+    ile_profiles_defined = False
     if singularity_image and is_container_manifest(singularity_image):
         singularity_is_family = True
         _manifest = load_container_manifest(singularity_image)
+        # Per-host ILE profiles: executable + memory chosen at match time from the
+        # same branch as the image.  GPU jobs only (a CPU slot has no capability
+        # attribute to select on).
+        ile_profiles_defined = bool(use_singularity and has_ile_profiles(_manifest))
+        ile_profiles_active = bool(ile_profiles_defined and ile_profiles and request_gpu)
+        if ile_profiles_active and current_backend_name() not in ('htcondor', 'glue'):
+            raise ContainerManifestError(
+                "container family ILE profiles need HTCondor match-time ($$) substitution; "
+                "backend '{}' cannot provide it".format(current_backend_name()))
+        if ile_profiles_defined and ile_profiles and not request_gpu:
+            print(" WARNING: container family ILE profiles ignored for a job that requests no GPU ")
         singularity_image_expr = build_singularity_image_expr(_manifest)
         singularity_transfer_expr = build_transfer_input_expr(_manifest)
         singularity_require_gpus_floor = build_require_gpus_floor(_manifest)
@@ -2521,14 +2561,25 @@ def write_ILE_sub_simple(tag='integrate', exe=None, log_dir=None, use_eos=False,
             # execs the real command under apptainer.  Keep this independent of
             # container universe, which is the preferred OSG path when enabled.
             singularity_runtime_select = bool(use_singularity and os.environ.get('RIFT_CONTAINER_RUNTIME_SELECT'))
+            if singularity_runtime_select and ile_profiles_active:
+                # The wrapper picks the image after the slot is carved, too late to
+                # choose request_memory.
+                raise ContainerManifestError(
+                    "container family ILE profiles (ile_exe/request_memory) need match-time "
+                    "selection; they cannot be combined with RIFT_CONTAINER_RUNTIME_SELECT")
         # Selective transfer: only the matched osdf image is fetched (via the
         # $$() token, which is comma-free so it survives transfer_input_files
         # comma-splitting).  CVMFS/local images are referenced in place and
-        # never transferred, so the whole family is never pulled.  In container-
-        # universe mode the image is delivered via container_image itself; in
-        # runtime-select mode the wrapper self-fetches.  In both cases do NOT add
-        # the match-time transfer token.
-        if singularity_transfer_expr and not singularity_container_universe and not singularity_runtime_select:
+        # never transferred, so the whole family is never pulled.
+        #
+        # Container universe needs this token too: its container_image selector
+        # names BASENAMES (it may not contain a '/', or condor_submit truncates
+        # it -- see build_container_image_select), so the image itself must be
+        # delivered by file transfer.  Runtime-select mode self-fetches inside
+        # the wrapper. CPU container-universe jobs use a literal fallback image,
+        # which condor_submit transfers without a GPU-capability expression.
+        if (singularity_transfer_expr and not singularity_runtime_select
+                and (request_gpu or not singularity_container_universe)):
             extra_files += [singularity_transfer_expr]
     elif singularity_image:
         if 'osdf:' in singularity_image:
@@ -2597,13 +2648,9 @@ echo Starting ...
     #
     # Add options en mass, by brute force
     #
-    arg_str = arg_str.lstrip() # remove leading whitespace and minus signs
-    arg_str = arg_str.lstrip('-')
-    if '"' in arg_str:
-        arg_str = safely_quote_arg_str(arg_str)
-        #arg_str = arg_str.replace('"','""') # double quote for condor - weird but true
-    ile_job.add_opt(arg_str,'')  # because we must be idiotic in how we pass arguments, I strip off the first two elements of the line
-#    ile_job.add_opt(arg_str[2:],'')  # because we must be idiotic in how we pass arguments, I strip off the first two elements of the line
+    # Store real argv, not shell or Condor quoting, until backend emission.
+    # Condor and Slurm use different quoting rules for the same literal values.
+    ile_job.literal_argv = shlex.split(arg_str)
 
     #
     # Macro based options.
@@ -2676,7 +2723,11 @@ echo Starting ...
             ile_job.add_condor_cmd('environment', new_resolved_env)
         else:
             ile_job.add_condor_cmd('getenv', env_statement)  # retrieve any RIFT commands -- specifically RIFT_LOWLATENCY
-    ile_job.add_condor_cmd('request_memory', str(request_memory)+"M") 
+    if ile_profiles_active:
+        # ClassAd expression in MB, evaluated against the matched slot
+        ile_job.add_condor_cmd('request_memory', build_request_memory_expr(_manifest, request_memory))
+    else:
+        ile_job.add_condor_cmd('request_memory', str(request_memory)+"M") 
     if not(request_disk is False):
         ile_job.add_condor_cmd('request_disk', str(request_disk)) 
     nGPUs =0
@@ -2822,11 +2873,39 @@ echo Starting ...
             f.write("cp local_relative.cache local.cache \n")
             # Only GPU ILE jobs fan out; a CPU-only ILE job bakes '1' so the default
             # 'all' policy never makes a non-GPU job grab the node's GPUs.
-            f.write(ile_invocation_shell(exe, fanout=(ile_gpu_fanout_value() if request_gpu else '1')))
+            f.write(ile_invocation_shell(exe, fanout=(ile_gpu_fanout_value() if request_gpu else '1'), exe_from_arg=ile_profiles_defined))
             os.system("chmod a+x ile_pre.sh")
             ile_job.set_executable("ile_pre.sh")  # transferred, used as executable
             singularity_inner_exe = "./ile_pre.sh"
 #          ile_job.add_condor_cmd('+PreCmd', '"ile_pre.sh"')
+    elif ile_profiles_active:
+        # No frame prescript, but the executable still has to come from the
+        # --rift-ile-exe argument: run ILE through a minimal transferred dispatcher.
+        # Single GPU, as when the executable runs directly.
+        cmdname = 'ile_dispatch.sh'
+        if transfer_files is None:
+            transfer_files = []
+        elif not isinstance(transfer_files, list):
+            transfer_files = [transfer_files]
+        transfer_files += ["../" + cmdname]
+        with open(cmdname, 'w') as f:
+            f.write("#! /bin/bash -e \n")
+            f.write(ile_invocation_shell(exe, fanout='1', exe_from_arg=True))
+        os.system("chmod a+x " + cmdname)
+        ile_job.set_executable(cmdname)
+        singularity_inner_exe = "./" + cmdname
+
+    if ile_profiles_active:
+        # One selector per choice, all over the same branches, so the image, the
+        # executable and the memory always come from the same manifest entry.  The
+        # schedd records the chosen values per match (MATCH_EXP_*, MemoryProvisioned).
+        ile_job.add_condor_cmd('MY.RIFTILEProfile', build_profile_label_expr(_manifest))
+        ile_job.add_condor_cmd('MY.RIFTILEProfileMatched', '"$$([MY.RIFTILEProfile])"')
+        ile_job.add_condor_cmd('MY.RIFTILEExe', build_ile_exe_expr(_manifest, exe, singularity_base_exe_path))
+        # An argument, not the environment: getenv, resolved-env statements and
+        # later environment commands cannot drop or mangle it.  ile_pre.sh is shared
+        # by every ILE-family job; one without this argument runs the default.
+        ile_job.add_arg(ILE_EXE_ARG + '$$([MY.RIFTILEExe])')
 
 
 #    if use_osg:
@@ -2868,12 +2947,21 @@ echo Starting ...
 
     if not transfer_files is None:
         if not isinstance(transfer_files, list):
-            fname_str=transfer_files + ' '.join(extra_files)
+            fname_str = ','.join(part for part in [transfer_files] + extra_files if part)
         else:
             fname_str = ','.join(transfer_files+extra_files)
         fname_str=fname_str.strip()
         ile_job.add_condor_cmd('transfer_input_files', fname_str)
         ile_job.add_condor_cmd('should_transfer_files','YES')
+        if singularity_container_universe and request_gpu:
+            # condor_submit APPENDS the container_image value to the derived
+            # TransferInput.  Our selector names basenames (it may not contain a
+            # '/'), so that appended entry would ask the execute point to fetch a
+            # bare file name from the access point and fail.  Set TransferInput
+            # directly -- emitted after transfer_input_files, it wins -- so the
+            # list is exactly ours, with the matched image supplied by the
+            # comma-free $$() ternary already in extra_files.
+            ile_job.add_condor_cmd('MY.TransferInput', '"' + fname_str.replace('"', '\\"') + '"')
 
     if not transfer_output_files is None:
         if not isinstance(transfer_output_files, list):
@@ -3106,14 +3194,15 @@ def write_calpilot_sub(tag='calpilot', exe=None, log_dir=None, universe="vanilla
         singularity_require_gpus_floor = build_require_gpus_floor(_manifest)
         singularity_container_universe = bool(use_singularity and os.environ.get('RIFT_CONTAINER_UNIVERSE'))
         if singularity_container_universe:
-            singularity_container_image_select = build_container_image_select(_manifest)
-        else:
-            # Selective ($$()) transfer of only the matched osdf image (comma-free so
-            # it survives transfer_input_files comma-splitting).  In container-universe
-            # mode the image is delivered via container_image itself, so skip this.
-            _transfer_expr = build_transfer_input_expr(_manifest)
-            if on_osg and _transfer_expr:
-                transfer_files += [_transfer_expr]
+            singularity_container_image_select = build_container_image_select(_manifest, request_gpu=request_gpu)
+        # Selective ($$()) transfer of only the matched osdf image (comma-free so it
+        # survives transfer_input_files comma-splitting).  Container universe needs it
+        # too: its container_image selector names BASENAMES (it may not contain a '/',
+        # or condor_submit truncates it), so the image arrives by file transfer.
+        # (container universe requires use_singularity, which already implies on_osg)
+        _transfer_expr = build_transfer_input_expr(_manifest)
+        if on_osg and _transfer_expr and (request_gpu or not singularity_container_universe):
+            transfer_files += [_transfer_expr]
 
     if use_singularity:
         base = os.environ.get('SINGULARITY_BASE_EXE_DIR', '/usr/bin/')
@@ -3220,8 +3309,14 @@ def write_calpilot_sub(tag='calpilot', exe=None, log_dir=None, universe="vanilla
         # absolute paths -> condor transfers each to the worker scratch dir by basename,
         # which is what the stage args (basenames) reference.
         transfer_files += [wd + "/consolidated_$(macroiteration).composite", ile_args_file]
-        job.add_condor_cmd('transfer_input_files', ','.join(transfer_files))
+        _tif_str = ','.join(transfer_files)
+        job.add_condor_cmd('transfer_input_files', _tif_str)
         job.add_condor_cmd('should_transfer_files', 'YES')
+        if singularity_container_universe and request_gpu:
+            # condor_submit APPENDS the container_image value to the derived
+            # TransferInput; our selector names basenames, so that entry would ask
+            # the execute point to fetch a bare file name and fail.  Pin the list.
+            job.add_condor_cmd('MY.TransferInput', '"' + _tif_str.replace('"', '\\"') + '"')
         job.add_condor_cmd('when_to_transfer_output', 'ON_EXIT')
         job.add_condor_cmd('transfer_output_files', 'cal_consolidated_$(macroiteration).npz')
     # Container-family GPU jobs (CALPILOT runs ILE on a GPU): exclude slots that
@@ -3301,7 +3396,7 @@ def write_extrconsolidate_sub(tag='extrconsolidate', exe=None, log_dir=None, uni
     return job, sub_name
 
 
-def write_unify_sub_simple(tag='unify', exe=None, base=None,target=None,universe="vanilla",arg_str=None,log_dir=None, use_eos=False,ncopies=1,no_grid=False, max_runtime_minutes=60,extra_text='',**kwargs):
+def write_unify_sub_simple(tag='unify', exe=None, base=None,target=None,universe="vanilla",arg_str=None,log_dir=None, use_eos=False,ncopies=1,no_grid=False, max_runtime_minutes=60,extra_text='',script_name=None,glob_pattern='*.composite',fail_on_error=False,**kwargs):
     """
     Write a submit file for launching a consolidation job
        util_ILEdagPostprocess.sh   # suitable for ILE consolidation.  
@@ -3323,34 +3418,53 @@ def write_unify_sub_simple(tag='unify', exe=None, base=None,target=None,universe
     # Write unify.sh
     #    - problem of globbing inside condor commands
     #    - problem that *.composite files from intermediate results will generally NOT be present 
-    cmdname ='unify.sh'
+    # script_name: a workflow with more than one unify job (e.g. a pooled
+    # cross-model net AND a per-model net) needs a distinct script per job,
+    # or the second write clobbers the first.
+    cmdname = script_name if script_name else 'unify.sh'
     base_str = ''
     if not (base is None):
         base_str = ' ' + base +"/"
+    # A condor macro CANNOT be interpolated into this shell script: inside bash,
+    # $(macroapprox) is COMMAND SUBSTITUTION, so it runs a nonexistent command,
+    # expands to the empty string, and the glob silently matches nothing.  When
+    # the pattern carries a macro, pass it as an ARGUMENT ($1) and let condor
+    # expand it in the submit file -- which is how join_grids.sh already works.
+    pattern_is_macro = "$(" in glob_pattern
+    glob_str = base_str + ("$1" if pattern_is_macro else glob_pattern)
     with open(cmdname,'w') as f:        
         f.write("#! /usr/bin/env bash\n")
         if len(extra_text) > 0:
             f.write(extra_text+"\n")
-        f.write( "ls " + base_str+"*.composite  1>&2 \n")  # write filenames being concatenated to stderr
+        f.write( "ls " + glob_str+"  1>&2 \n")  # write filenames being concatenated to stderr
         # Sometimes we need to pass --eccentricity or --tabular-eos-file etc to util_CleanILE.py
         extra_args = ''
         if arg_str:
             extra_args = arg_str
-        f.write( exe + extra_args+ base_str+ "*.composite \n")
-        # Backstop code for untify.sh
+        f.write( exe + extra_args+ glob_str+ " \n")
+        # Historical single-model workflows fall back to raw concatenation if
+        # CleanILE fails.  A model-aware workflow must fail closed: otherwise
+        # a validation error silently changes model marginalization into flat
+        # replica pooling while the DAG reports success.
         f.write("""ret_value=$?
 if [ $ret_value -eq 0 ]; then
   exit 0
-else
+""")
+        if fail_on_error:
+            f.write("else\n  exit $ret_value\n")
+        else:
+            f.write("""else
   cat {}
-fi
-""".format(base_str+"*.composite"))
+""".format(glob_str))
+        f.write("fi\n")
     st = os.stat(cmdname)
     import stat
     os.chmod(cmdname, st.st_mode | stat.S_IEXEC)
 
 
     ile_job = CondorDAGJob(universe=universe, executable=base_str+cmdname) # force full prefix
+    if pattern_is_macro:
+        ile_job.add_arg(glob_pattern)   # condor expands the macro here, not bash
     requirements=[]
     if universe=='local':
         requirements.append("IS_GLIDEIN=?=undefined")
@@ -3424,7 +3538,10 @@ def write_convert_sub(tag='convert', exe=None, file_input=None,file_output=None,
         arg_str = arg_str.lstrip('-')
         ile_job.add_opt(arg_str,'')  # because we must be idiotic in how we pass arguments, I strip off the first two elements of the line
 #        ile_job.add_opt(arg_str[2:],'')  # because we must be idiotic in how we pass arguments, I strip off the first two elements of the line
-    ile_job.add_arg(file_input)
+    if file_input is not None:
+        # a tool whose inputs are all named options has no trailing positional;
+        # adding one unguarded appends the literal string "None" to the command
+        ile_job.add_arg(file_input)
     
     #
     # Logging options
@@ -3677,6 +3794,83 @@ def write_init_sub(tag='gridinit', exe=None,arg_str=None,log_dir=None, use_eos=F
 
     return ile_job, ile_sub_name
 
+
+
+def write_seed_climb_sub(tag='seed_climb', exe=None, arg_str='', log_dir=None, out_dir=None,
+                         request_memory=8192, request_gpus=0, request_disk='4G',
+                         use_singularity=False, singularity_image=None,
+                         universe='vanilla', condor_commands=None, **kwargs):
+    """
+    Submit file for the transverse-spin seed climb (util_TransverseSeedClimb.py).
+
+    Run the climber with explicit arg_str arguments in out_dir.  The caller
+    chooses prepend, parallel or composite inputs and outputs, and places the
+    node using DAG dependencies.  Inputs and outputs need a filesystem shared
+    with the worker: this helper does not stage input files.  request_gpus
+    reserves a device; the runtime arguments and backend determine its use.
+    """
+    exe = exe or which("util_TransverseSeedClimb.py")
+    job = CondorDAGJob(universe=universe, executable=exe)
+    sub_name = tag + '.sub'
+    job.set_sub_file(sub_name)
+    job.add_opt(arg_str.strip().lstrip('-'), '')   # add_opt prepends '--'
+    log_dir = log_dir or ((out_dir + "/") if out_dir else "")
+    uniq_str = "$(cluster)-$(process)"
+    job.set_log_file("%s%s-%s.log" % (log_dir, tag, uniq_str))
+    job.set_stderr_file("%s%s-%s.err" % (log_dir, tag, uniq_str))
+    job.set_stdout_file("%s%s-%s.out" % (log_dir, tag, uniq_str))
+    if out_dir:
+        job.add_condor_cmd('initialdir', out_dir)
+    env = "OMP_NUM_THREADS=1 JAX_ENABLE_X64=1 XLA_PYTHON_CLIENT_PREALLOCATE=false"
+    if use_singularity and singularity_image:
+        # getenv=* would carry the submit host's HOME, which the container
+        # runtime then fails to create on the worker.  Pass RIFT variables only,
+        # plus an explicit checkout for a climber not yet in the image.
+        job.add_condor_cmd('getenv', os.environ.get('RIFT_GETENV_OSG', '*RIFT*'))
+        if os.environ.get('RIFT_SEED_CLIMB_PYTHONPATH'):
+            env += " PYTHONPATH=" + os.environ['RIFT_SEED_CLIMB_PYTHONPATH']
+    else:
+        job.add_condor_cmd('getenv', default_getenv_value)
+    job.add_condor_cmd('request_memory', str(request_memory) + "M")
+    job.add_condor_cmd('request_disk', request_disk)
+    job.add_condor_cmd('environment', '"' + env + '"')
+    if request_gpus:
+        job.add_condor_cmd('request_GPUs', str(int(request_gpus)))
+    climb_requirements = None
+    if use_singularity and singularity_image:
+        # The climb reads and writes the run directory in place, so it must stay
+        # in the CIT pool, where /scratch is mounted; the executable is a path
+        # inside the container (or on a filesystem the container binds).
+        job.add_condor_cmd('MY.SingularityImage', '"' + singularity_image + '"')
+        job.add_condor_cmd('MY.SingularityBindCVMFS', 'True')
+        # No flock_local: the CIT schedd rewrites it to POOLS = "IGWN,CIT".
+        job.add_condor_cmd('MY.POOLS', '"CIT"')
+        # prebuilt jaxlib needs AVX; CIT's x86_64-v1 GPU hosts (GTX 1050 Ti) lack it
+        climb_requirements = '(HAS_SINGULARITY=?=TRUE) && (TARGET.Microarch =!= "x86_64-v1") && (TARGET.has_avx =!= False)'
+        job.add_condor_cmd('transfer_executable', 'False')
+        # A transfer sandbox gives the container a HOME; without one, Singularity
+        # tries to create the submit user's /home on the worker and fails.
+        job.add_condor_cmd('should_transfer_files', 'YES')
+        job.add_condor_cmd('when_to_transfer_output', 'ON_EXIT')
+        # stream logs: an evicted sandboxed job otherwise returns no output at all
+        job.add_condor_cmd('stream_output', 'True')
+        job.add_condor_cmd('stream_error', 'True')
+    if condor_commands is not None:
+        for cmd, value in condor_commands.items():
+            if climb_requirements is not None and cmd.lower() == 'requirements':
+                # Condor submit keys are case insensitive. Keep container and
+                # CPU eligibility when inheriting ILE GPU requirements.
+                climb_requirements += ' && (' + str(value).strip() + ')'   # ILE command values keep their newline
+                continue
+            job.add_condor_cmd(cmd, value)
+    if climb_requirements is not None:
+        job.add_condor_cmd('requirements', climb_requirements)
+    try:
+        job.add_condor_cmd('accounting_group', os.environ['LIGO_ACCOUNTING'])
+        job.add_condor_cmd('accounting_group_user', os.environ['LIGO_USER_NAME'])
+    except KeyError:
+        print(" LIGO accounting information not available.  You must add this manually to " + sub_name)
+    return job, sub_name
 
 
 def write_psd_sub_BW_monoblock(tag='PSD_BW_mono', exe=None, log_dir=None, ncopies=1,arg_str=None,request_memory=4096,arg_vals=None, transfer_files=None,transfer_output_files=None,use_singularity=False,use_osg=False,singularity_image=None,frames_dir=None,cache_file=None,psd_length=4,srate=4096,data_start_time=None,event_time=None,universe='local',no_grid=False,**kwargs):
@@ -4080,7 +4274,11 @@ def write_resample_sub(tag='resample', exe=None, file_input=None,file_output=Non
 
 
 
-def write_cat_sub(tag='cat', exe=None, file_prefix=None,file_postfix=None,file_output=None,universe="vanilla",arg_str='',log_dir=None, use_eos=False,ncopies=1, no_grid=False,**kwargs):
+def write_cat_sub(tag='cat', exe=None, file_prefix=None,file_postfix=None,
+                  file_output=None, universe="vanilla",
+                  arg_str='',log_dir=None, use_eos=False,ncopies=1,
+                  no_grid=False, search_root='.', expected_batches=None,
+                  events_per_batch=None, **kwargs):
     """
     Write a submit file for launching a 'resample' job
        util_ResampleILEOutputWithExtrinsic.py
@@ -4091,10 +4289,26 @@ def write_cat_sub(tag='cat', exe=None, file_prefix=None,file_postfix=None,file_o
     exe_switch = which("switcheroo")  # tool for patterend search-replace, to fix first line of output file
 
     cmdname = 'catjob.sh'
+    # Condor expands macros only in submit-file fields, never inside the shell
+    # script.  Pass BOTH the search root and output name as arguments.  Besides
+    # avoiding bash command substitution for $(macroapprox), this lets callers
+    # scope the input tree per model instead of running `find .` over a shared
+    # top-level directory and mixing every model's posterior samples.
     with open(cmdname,'w') as f:
         f.write("#! /bin/bash\n")
-        f.write(exe+"  . -name '"+file_prefix+"*"+file_postfix+r"' -exec cat {} \; | sort -r | uniq > "+file_output+";\n")
-        f.write(exe_switch + " 'm1 ' '# m1 ' "+file_output)  # add standard prefix
+        if expected_batches is not None and events_per_batch is not None:
+            f.write("set -e -o pipefail\n")
+            f.write("{ for ((batch=0; batch<$3; batch++)); do "
+                    "event=$((batch*$4)); "
+                    "for ((idx=0; idx<$4; idx++)); do "
+                    "file=\"$1/EXTR_out-${event}.xml_${idx}_.dat\"; "
+                    "if [ ! -s \"$file\" ]; then "
+                    "echo \"catjob: missing expected input $file\" >&2; exit 1; fi; "
+                    "cat \"$file\"; done; done; } | sort -r | uniq > \"$2\";\n")
+        else:
+            f.write(exe+"  \"$1\" -name '"+file_prefix+"*"+file_postfix+
+                    "' -exec cat {} \\; | sort -r | uniq > \"$2\";\n")
+        f.write(exe_switch + " 'm1 ' '# m1 ' \"$2\"")  # add standard prefix
         os.system("chmod a+x "+cmdname)
 
     ile_job = CondorDAGJob(universe=universe, executable='catjob.sh')
@@ -4116,6 +4330,11 @@ def write_cat_sub(tag='cat', exe=None, file_prefix=None,file_postfix=None,file_o
 
     ile_sub_name = tag + '.sub'
     ile_job.set_sub_file(ile_sub_name)
+    ile_job.add_arg(search_root or '.')
+    ile_job.add_arg(file_output)
+    if expected_batches is not None and events_per_batch is not None:
+        ile_job.add_arg(str(expected_batches))
+        ile_job.add_arg(str(events_per_batch))
 
 
 #    ile_job.add_arg(" . -name '" + file_prefix + "*" +file_postfix+"' -exec cat {} \; ")
@@ -4430,10 +4649,33 @@ def write_calibration_uncertainty_reweighting_sub(tag='Calib_reweight', exe=None
 
     singularity_image_used = "{}".format(singularity_image) # make copy
     extra_files = []
-    if singularity_image:
-            if 'osdf:' in singularity_image:
-                singularity_image_used  = "./{}".format(singularity_image.split('/')[-1])
-                extra_files += [singularity_image]
+    # Calibration reweighting is CPU-only.  A container-family capability
+    # expression cannot be evaluated on a CPU slot, so collapse the family to
+    # its explicitly configured fallback image (the same policy as CIP).
+    # Never pass the manifest YAML itself to the container runtime.
+    singularity_is_family = False
+    singularity_container_universe = False
+    singularity_container_image = None
+    singularity_fallback_runtime = None
+    if singularity_image and is_container_manifest(singularity_image):
+        singularity_is_family = True
+        _manifest = load_container_manifest(singularity_image)
+        singularity_container_universe = bool(
+            use_singularity and os.environ.get('RIFT_CONTAINER_UNIVERSE')
+        )
+        if singularity_container_universe:
+            singularity_container_image = build_container_image_select(
+                _manifest, request_gpu=False
+            )
+        else:
+            singularity_fallback_runtime, _fb_transfer = build_fallback_single_image(
+                _manifest
+            )
+            if _fb_transfer:
+                extra_files += [_fb_transfer]
+    elif singularity_image and 'osdf:' in singularity_image:
+        singularity_image_used = "./{}".format(singularity_image.split('/')[-1])
+        extra_files += [singularity_image]
 
 
     
@@ -4452,7 +4694,10 @@ def write_calibration_uncertainty_reweighting_sub(tag='Calib_reweight', exe=None
             singularity_base_exe_path = "/usr/bin/"  # should not hardcode this ...!
         exe=singularity_base_exe_path + exe_base
 
-    ile_job = CondorDAGJob(universe="vanilla", executable=exe)
+    ile_job = CondorDAGJob(
+        universe=("container" if singularity_container_universe else "vanilla"),
+        executable=exe,
+    )
     # This is a hack since CondorDAGJob hides the queue property
     ile_job._CondorJob__queue = ncopies
 
@@ -4468,8 +4713,18 @@ def write_calibration_uncertainty_reweighting_sub(tag='Calib_reweight', exe=None
         # Compare to https://github.com/lscsoft/lalsuite/blob/master/lalinference/python/lalinference/lalinference_pipe_utils.py
         ile_job.add_condor_cmd('request_CPUs', str(1))
         ile_job.add_condor_cmd('transfer_executable', 'False')
-        ile_job.add_condor_cmd("MY.SingularityBindCVMFS", 'True')
-        ile_job.add_condor_cmd("MY.SingularityImage", '"' + singularity_image_used + '"')
+        if singularity_container_universe:
+            ile_job.add_condor_cmd("container_image", singularity_container_image)
+        else:
+            ile_job.add_condor_cmd("MY.SingularityBindCVMFS", 'True')
+            if singularity_is_family:
+                ile_job.add_condor_cmd(
+                    "MY.SingularityImage", '"' + singularity_fallback_runtime + '"'
+                )
+            else:
+                ile_job.add_condor_cmd(
+                    "MY.SingularityImage", '"' + singularity_image_used + '"'
+                )
         ile_job.add_condor_cmd("transfer_output_files", "weight_files")
         requirements.append("HAS_SINGULARITY=?=TRUE")
         print(" WARNING: cal reweighting requires bilby. Directories are moved to cal_evelopes")

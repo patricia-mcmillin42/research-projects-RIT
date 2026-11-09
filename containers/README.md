@@ -1,7 +1,7 @@
 # RIFT containers
 
 This directory holds the multi-architecture container build and the "container
-family" deployment mechanism. It has two related but independent pieces:
+family" deployment mechanism. It has three related pieces:
 
 1. **Multi-target build** — build a *family* of RIFT containers (different base
    image + cupy/CUDA variant, targeting different GPU compute capabilities) from
@@ -9,6 +9,9 @@ family" deployment mechanism. It has two related but independent pieces:
 2. **Family deployment** — let `SINGULARITY_RIFT_IMAGE` point at a YAML
    *manifest* describing that family, so each Condor job picks the right image
    for the machine it lands on.
+3. **Survey + warmup scans** — survey a target Condor GPU pool and emit
+   representative CuPy/JAX warmup jobs for the image bands that pool actually
+   uses.
 
 The top-level [`rift_container.def`](../rift_container.def) is unchanged and
 remains the default single-image build.
@@ -37,9 +40,13 @@ containers/build_family.sh [--render-only] [OUTPUT_DIR]
 All matrix entries share the pip set in
 [`requirements-container.txt`](requirements-container.txt) (the cupy wheel is the
 only per-entry difference). That file is the **single source of truth** also
-consumed by the CI dependency canary (below). `build_family.sh` stages it into
-each image via the `.def`'s `%files` section, so the build does **not** depend on
-the cloned RIFT branch shipping the file.
+consumed by the CI dependency canary (below). The isolated PEP 517 build
+environments additionally use
+[`constraints-container-build.txt`](constraints-container-build.txt) for narrow
+build-tool compatibility bounds that do not pin the runtime solve.
+`build_family.sh` stages both files into each image via the `.def`'s `%files`
+section, so the build does **not** depend on the cloned RIFT branch shipping
+them.
 
 ### Build troubleshooting
 
@@ -118,9 +125,9 @@ example. Schema:
 For the ILE (and CIP) Condor submit, a manifest produces:
 
 - **`MY.SingularityImage`** — an *unquoted* `ifThenElse(...)` expression that
-  selects the highest-capability image the matched machine can run, defaulting to
-  the `fallback` image (also used when the capability attribute is `undefined`,
-  e.g. on a CPU-only CIP slot — hence the fallback must be CPU-safe):
+  selects the highest-capability image the matched machine can run, with the
+  `fallback` image as the innermost `else` (used when the machine's capability is
+  below every threshold):
 
   ```
   ifThenElse(TARGET.GPUs_Capability >= 8.0, "./rift_container_modern.sif", "/cvmfs/.../rift_container_default.sif")
@@ -141,6 +148,73 @@ For the ILE (and CIP) Condor submit, a manifest produces:
 - **`require_gpus` floor** — `Capability >= <lowest min across the family>`,
   composed (`&&`) with any user-supplied `RIFT_REQUIRE_GPUS` (which today you use
   to block incompatible hosts by `DeviceName`). Both apply; neither is dropped.
+
+- **A capability-defined `Requirements` clause** — `TARGET.GPUs_Capability =!=
+  undefined`. The selection is deliberately *not* undefined-guarded: an
+  undefined-capability slot could be anything (including a Blackwell that
+  hard-fails on the older fallback), so the safe action is to not match it rather
+  than guess. Measured on CIT, a large fraction of GPU slots satisfy the per-GPU
+  `require_gpus` floor yet do not advertise the machine-level rollup attribute;
+  without this clause those jobs hold with "Cannot expand $$ expression".
+
+**CIP is different.** It requests no GPU, so its matched slot advertises no
+capability and a capability-keyed selection cannot resolve (it would hold the
+job). CIP therefore collapses to a **single fixed container** — the manifest
+`fallback` image as a quoted literal, with no `$$()` token and no capability
+`Requirements` clause. This is why the fallback must be CPU-safe.
+
+### OSG: pick a delivery mode
+
+The expression-valued `MY.SingularityImage` is evaluated *execute-side*. OSPool
+glidein pilots read `SingularityImage` as a **literal string**, so an
+`ifThenElse` lands verbatim and the job holds. Two opt-in modes fix this,
+selected by an environment variable at DAG-build time:
+
+| env var | behaviour |
+|---|---|
+| *(unset)* | legacy `universe = vanilla` + expression-valued `MY.SingularityImage`. Correct on a local/CIT pool; **not OSG-safe**. |
+| `RIFT_CONTAINER_UNIVERSE=1` | **recommended for OSG.** `universe = container` + `container_image = $$([ ifThenElse(...) ])` over image BASENAMES. `$$()` is HTCondor's match-time (schedd-side) machine-ad substitution, so the pilot only ever sees a literal image name. No `MY.SingularityImage`, no `MY.SingularityBindCVMFS`; the matched image arrives via the `$$()` transfer token with `MY.TransferInput` pinned (see below). Requires every family image to be a transferable URL. GPU access is automatic under `request_gpus`. Works on CIT-local too. |
+| `RIFT_CONTAINER_RUNTIME_SELECT=1` | older ILE-only fallback: Condor runs a generated `rift_container_select.sh` on the bare node, which reads the real capability from `nvidia-smi`, fetches only the matching image (`stashcp`/`pelican`) and re-execs under `apptainer exec --nv`. |
+
+Under asimov set it from the blueprint, not the shell:
+
+```yaml
+scheduler:
+  singularity image: /path/to/rift_container_family.yaml
+  singularity base exe directory: /usr/local/bin/
+  environment variables:
+    RIFT_CONTAINER_UNIVERSE: 1
+```
+
+With `osdf://` images inside a manifest, the pipeline also enables the matching
+transfer credential automatically (`use_oauth_services = scitokens`, or `igwn`
+for `igwn+osdf:`) by inspecting the manifest's image URLs — the single-image path
+keys off the `SINGULARITY_RIFT_IMAGE` string, which for a family is only a
+`.yaml` path.
+
+> **Why the container-universe selector names basenames, not URLs.**
+> `condor_submit` parses `container_image` *before* any `$$` expansion and derives
+> the job ad's `ContainerImage` -- the name the image gets in the job scratch dir --
+> as the text after the **last** `/`. A selector containing full paths is cut in
+> half, and the fragment that survives is not a valid image name. Submitting that
+> form to the IGWN pool holds the job at the execute point:
+> `PREPARE_JOB (prepare-hook) failed: Unable to download or build singularity image
+> cutest_busybox_...sif") ])`.
+>
+> So the selector emits **basenames only** (no `/`); the whole `$$` token survives
+> into `ContainerImage` and the schedd expands it at match time
+> (`MATCH_EXP_ContainerImage = "rift_container_modern.sif"`). The image itself
+> arrives via the comma-free `$$()` transfer token, and `MY.TransferInput` is pinned
+> so `condor_submit` does not append the basename selector to `TransferInput` as a
+> bogus extra input file. Verified end to end on an OSPool glidein against
+> `$CondorVersion: 25.11.1`.
+>
+> Consequence: **every image in a family used with container universe must be a
+> transferable URL.** An in-place (CVMFS/local) image can only be named by its full
+> path, which reintroduces the truncation, so `build_container_image_select()`
+> raises `ContainerManifestError` for such a family. Stage those images at a URL, or
+> use `RIFT_CONTAINER_RUNTIME_SELECT=1`.
+
 
 ### HTCondor GPU attribute names — important
 
@@ -182,13 +256,55 @@ Validated on a real HTCondor pool + GPU (a cap-3.0 machine):
   the empty entry is skipped and the job runs clean. (So mixed manifests are
   safe; you do *not* need uniform all-osdf / all-cvmfs retrieval.)
 
-One item still needs a real **OSG/GWMS** pilot (a local pool has no singularity
-wrapper to exercise it): that the pilot evaluates the expression-valued
-`MY.SingularityImage` and honors a relative `./name.sif` produced by it.
+The expression-valued `MY.SingularityImage` is *not* OSPool-safe — a GWMS pilot
+reads it as a literal string. Use `RIFT_CONTAINER_UNIVERSE=1` on the OSG (see
+"OSG: pick a delivery mode" above).
 
 ---
 
-## 3. CI dependency-resolution canary
+## 3. Survey + Warmup Scans
+
+`survey_scan.sh` records the target pool's GPU classes, emits one Condor warmup
+job per container/profile combination, and collects JSON timing/cache reports.
+The submit-side tools use only the Python standard library; the CuPy/JAX imports
+happen inside the container on the execute node.
+
+```console
+containers/survey_scan.sh survey \
+  --out survey/cit-YYYYMMDD \
+  --manifest container_family/rift_container_family.generated.yaml
+containers/survey_scan.sh emit-jobs \
+  --survey survey/cit-YYYYMMDD \
+  --manifest container_family/rift_container_family.generated.yaml
+cd survey/cit-YYYYMMDD/jobs
+./submit_all.sh
+containers/survey_scan.sh collect --survey survey/cit-YYYYMMDD
+```
+
+Profiles:
+
+- `cupy` warms common NoLoop/fused-calmarg CuPy kernels:
+  `Q_inner_product_cupy`, `Q_fused_calmarg_cupy`,
+  `Q_fused_calmarg_distmarg_cupy`, and `interp_gpu.interp`.
+- `jax` warms synthetic JAX ILE wrapper shapes. Use this only for JAX-enabled
+  images, for example `--profiles cupy,jax` on a JAX image manifest.
+
+Generated job wrappers set `CUPY_CACHE_DIR`, `RIFT_JAX_CACHE_ROOT`, and
+conservative thread defaults before `apptainer exec --nv`. If an image is listed
+as `osdf://...`, the wrapper fetches only that selected image with `stashcp` or
+`pelican`.
+
+The JAX profile writes RIFT's compatibility manifest into the warmed cache.
+`rift_jax_cache export` produces a checksummed transferable bundle, while
+`rift_jax_cache import` refuses mismatched JAX/JAXLIB/CUDA backend, GPU
+kind/capability, Python runtime, profile, or file hashes.
+
+See [`survey_scan/README.md`](survey_scan/README.md) and
+[`SURVEY_SCAN_PROPOSAL.md`](SURVEY_SCAN_PROPOSAL.md) for details.
+
+---
+
+## 4. CI dependency-resolution canary
 
 The default container build uses *unpinned* deps, so a fresh upstream release
 (e.g. `swig>=4.4.0`, see issue #136) can silently break RIFT and we only find out
@@ -196,6 +312,9 @@ when a container rebuild fails. The `container-dep-canary` job in
 [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) installs the unpinned
 [`requirements-container.txt`](requirements-container.txt) set (minus the
 GPU-only cupy wheel) and the pixi `swig-post44` lane, then runs the import check —
-on every push/PR **and weekly** — to flag such breakage early. It is
-non-blocking (advisory): it tracks upstream changes outside any PR author's
-control.
+on every push/PR **and weekly** — to flag such breakage early. The pip lane
+applies the same build-only constraints as the real containers; the Pixi lane
+expresses the equivalent build compatibility in `pixi.toml`. Runtime packages
+remain unpinned, so the canaries still detect new dependency incompatibilities.
+The jobs are non-blocking (advisory): they track upstream changes outside any PR
+author's control.

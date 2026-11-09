@@ -53,4 +53,18 @@ cover/
 #   in the .venv directory. It is recommended not to include this directory in version control.
 .pixi/*
 !.pixi/config.toml
+asimov.log
 
+# Figures dropped in the repo root by demo/test scripts run from here by hand
+# (e.g. Code/test/integrators/demo_mcsamplerEnsemble*.py). Leading "/" anchors
+# these to the root only, so the tracked figures under
+# MonteCarloMarginalizeCode/ and docs/source/images/ are untouched.
+/*.png
+/*.pdf
+/*.jpg
+/*.jpeg
+
+# Automatic eccentric coordinate maps are per-run build products, never source.
+eccentric_phase_auto_cache.json
+eccentric_phase_auto_cache.json.tmp
+eccentric_phase_build.json
